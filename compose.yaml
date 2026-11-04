@@ -1,0 +1,86 @@
+name: sarjy
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sarjy}
+      POSTGRES_DB: ${POSTGRES_DB:-sarjy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks: [internal]
+    logging: &logging
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+
+  backend:
+    build: {context: ./backend, target: runtime}
+    environment: &backend_environment
+      # Component-based URL construction in config handles punctuation in passwords safely.
+      DB_HOST: db
+      POSTGRES_USER: ${POSTGRES_USER:-sarjy}
+      POSTGRES_DB: ${POSTGRES_DB:-sarjy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Riyadh}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_CHAT_MODEL: ${GROQ_CHAT_MODEL:-openai/gpt-oss-20b}
+      GROQ_WHISPER_MODEL: ${GROQ_WHISPER_MODEL:-whisper-large-v3-turbo}
+      GROQ_TTS_MODEL: ${GROQ_TTS_MODEL:-canopylabs/orpheus-v1-english}
+      GROQ_TTS_VOICE: ${GROQ_TTS_VOICE:-troy}
+      GROQ_TTS_ARABIC_MODEL: ${GROQ_TTS_ARABIC_MODEL:-canopylabs/orpheus-arabic-saudi}
+      GROQ_TTS_ARABIC_VOICE: ${GROQ_TTS_ARABIC_VOICE:-fahad}
+      OPEN_METEO_API_KEY: ${OPEN_METEO_API_KEY:-}
+      OPEN_METEO_GEOCODING_URL: ${OPEN_METEO_GEOCODING_URL:-https://geocoding-api.open-meteo.com/v1/search}
+      OPEN_METEO_FORECAST_URL: ${OPEN_METEO_FORECAST_URL:-https://api.open-meteo.com/v1/forecast}
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks: [internal]
+    logging: *logging
+
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks: [internal]
+    logging: *logging
+
+  tests:
+    profiles: [test]
+    build: {context: ./backend, target: test}
+    environment:
+      <<: *backend_environment
+      # Tests create their own random PostgreSQL schema and never drop application tables.
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [internal]
+
+volumes:
+  postgres_data:
+networks:
+  internal:

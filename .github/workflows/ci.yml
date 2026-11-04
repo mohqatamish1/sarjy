@@ -1,0 +1,65 @@
+name: Verify Sarjy
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  compose-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Configure isolated local stack
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import secrets
+          Path('.env').write_text(Path('.env.example').read_text().replace('POSTGRES_PASSWORD=\n', 'POSTGRES_PASSWORD=' + secrets.token_urlsafe(32) + '\n'))
+          PY
+      - name: Build and start production images
+        run: docker compose up --build -d --wait
+      - name: Test backend against PostgreSQL and check Python
+        run: |
+          docker compose --profile test build tests
+          docker compose --profile test run --rm tests sh -c 'ruff check app tests alembic && ruff format --check app tests alembic && pytest -q'
+      - name: Check the production app image
+        run: |
+          docker build -t sarjy-production:ci .
+          trap 'docker rm -f sarjy-production-ci >/dev/null 2>&1 || true' EXIT
+          docker run -d --name sarjy-production-ci --network sarjy_internal --env-file .env -e COOKIE_SECURE=false -e APP_ORIGIN=http://localhost:3001 -e PORT=9999 -e HOSTNAME=127.0.0.1 -e BACKEND_URL=http://unused.invalid -p 127.0.0.1:3001:3000 sarjy-production:ci
+          for attempt in $(seq 1 45); do
+            if curl -fsS http://localhost:3001/api/health >/dev/null 2>&1; then
+              curl -fsS http://localhost:3001/api/health
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs sarjy-production-ci
+          exit 1
+      - name: Install browser test dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test:audio
+          npx playwright install --with-deps chromium
+      - name: Desktop and mobile browser tests
+        working-directory: frontend
+        run: npm run test:e2e
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color --tail 100
+      - name: Browser report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
+      - name: Stop isolated stack
+        if: always()
+        run: docker compose down -v
